@@ -1,0 +1,14 @@
+{
+  "name": "rozana-retreats",
+  "private": true,
+  "workspaces": [
+    "app"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=rozana-ops",
+    "dev:ops": "npm run dev --workspace=rozana-ops",
+    "build": "npm run build --workspace=rozana-ops",
+    "build:ops": "npm run build --workspace=rozana-ops",
+    "db:migrate": "npm run db:migrate --workspace=rozana-ops"
+  }
+}

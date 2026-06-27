@@ -1,0 +1,15 @@
+export const labels = {
+  attendance: 'Attendance',
+  leave: 'Leave',
+  housekeeping: 'Housekeeping',
+  reports: 'Reports',
+  present: 'Present',
+  onLeave: 'On leave',
+  absent: 'Absent',
+  notIn: 'Not in yet',
+  todo: 'To do',
+  done: 'Done',
+  assign: 'Assign',
+  recordLeave: 'Record leave',
+  readOnly: 'System locked — cannot edit',
+} as const

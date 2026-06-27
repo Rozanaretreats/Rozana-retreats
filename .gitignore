@@ -1,0 +1,28 @@
+# Unrelated projects / local guides
+RozanaFoods/
+/Rozana_Fingerprint_Kiosk_Setup_Guide.md
+/Rozana_USB_Reader_GoLive_Checklist.md
+
+# Planning / extract artifacts (not product code)
+Rozanaretreats/_flow.zip
+Rozanaretreats/_flow_docx_extract/
+Rozanaretreats/diagnosis/
+Rozanaretreats/docs/source/
+Rozanaretreats/docs/Rozana-Flow-Inventory-v2.docx
+Rozanaretreats/docs/Rozana-Ops-Flow-Guide.html
+Rozanaretreats/docs/FLOW-COVERAGE.md
+Rozanaretreats/docs/UI-DESIGN.md
+Rozanaretreats/00-MAP-BUILD-ADOPT.md
+Rozanaretreats/07-flow-map-template.md
+Rozanaretreats/09-ROLES-AND-PERMISSIONS.md
+Rozanaretreats/14-FLOW-INVENTORY-FROM-BRIEF.md
+Rozanaretreats/15-WBS.md
+Rozanaretreats/BUILD-BRIEF.md
+
+# Dependencies & secrets
+**/node_modules/
+**/.env
+**/.env.local
+**/dist/
+**/build/
+**/.dart_tool/
