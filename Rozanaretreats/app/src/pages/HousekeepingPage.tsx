@@ -10,6 +10,7 @@ import { HkPhotoProof } from '../components/HkPhotoProof'
 import { ResolvedHkImage } from '../components/ResolvedHkImage'
 import { HkPhotoProofGallery } from '../components/HkPhotoProofGallery'
 import { CleaningTimeInfo } from '../components/CleaningTimeInfo'
+import { ManagerVerificationStatus } from '../components/ManagerVerificationStatus'
 import { RoomStatusBadge, StaffStatusBadge } from '../components/StatusBadge'
 import { useProperty, usePropertyFilter } from '../context/PropertyContext'
 import { useAuth } from '../context/AuthContext'
@@ -18,12 +19,14 @@ import { allRooms } from '../data/mockData'
 import { formatRoomSubtitle } from '../data/roomInventory'
 import { getProperty } from '../data/properties'
 import { isAvailableForHK } from '../lib/staffStatus'
-import { completedChecklistCount, displayVerificationPhotos } from '../lib/cleaningChecklist'
+import { completedChecklistCount, createDefaultChecklist, displayVerificationPhotos } from '../lib/cleaningChecklist'
 import { allowManualPunches } from '../lib/manualPunch'
 import { defaultTodayRange, formatPeriodLabel, todayIso } from '../lib/dates'
-import type { PropertyId, RoomStatus } from '../types'
+import type { CleaningChecklist, PropertyId, RoomStatus } from '../types'
 import { FormSelect, formInputClass } from '../components/FormSelect'
-import { Plus, Trash2, UserCheck, UserPlus, KeyRound } from 'lucide-react'
+import { Plus, Trash2, UserCheck, UserPlus, KeyRound, Pencil } from 'lucide-react'
+import { AssignChecklistEditor } from '../components/AssignChecklistEditor'
+import { EditAssignmentChecklistModal } from '../components/EditAssignmentChecklistModal'
 import { ResetStaffPasswordModal } from '../components/ResetStaffPasswordModal'
 
 const HK_ROLES = ['HK', 'HK Lead'] as const
@@ -35,7 +38,7 @@ const cardStyles: Record<RoomStatus, string> = {
 }
 
 type MainTab = 'tasks' | 'assign' | 'team' | 'proof'
-type TaskFilter = 'all' | 'open' | 'done'
+type TaskFilter = 'all' | 'open' | 'needs-check' | 'done'
 
 const inputClass = formInputClass
 
@@ -49,9 +52,9 @@ function suggestStaffEmail(name: string): string {
 }
 
 export function HousekeepingPage() {
-  const { isOwner } = useAuth()
+  const { isOwner, user } = useAuth()
   const { visiblePropertyIds } = useProperty()
-  const { staff, tasks, staffLoginEmails, addStaff, removeStaff, assignRoom, resetStaffPassword } =
+  const { staff, tasks, staffLoginEmails, addStaff, removeStaff, assignRoom, updateAssignmentChecklist, resetStaffPassword, verifyRoomByManager } =
     useOps()
 
   const [tab, setTab] = useState<MainTab>('tasks')
@@ -84,7 +87,16 @@ export function HousekeepingPage() {
     null,
   )
   const [taskRange, setTaskRange] = useState(defaultTodayRange)
+  const [assignChecklist, setAssignChecklist] = useState<CleaningChecklist>(createDefaultChecklist)
+  const [editChecklistTask, setEditChecklistTask] = useState<(typeof visibleTasks)[number] | null>(null)
+  const [verifyingTaskId, setVerifyingTaskId] = useState<string | null>(null)
   const [, setTick] = useState(0)
+
+  useEffect(() => {
+    if (tab === 'assign') {
+      setAssignChecklist(createDefaultChecklist())
+    }
+  }, [tab])
 
   useEffect(() => {
     const hasInProgress = visibleTasks.some((t) => t.status === 'cleaning' && t.cleaningStartedAt)
@@ -121,13 +133,20 @@ export function HousekeepingPage() {
   const filteredTasks = useMemo(() => {
     let list = visibleTasks
     if (taskFilter === 'open') list = list.filter((t) => t.status !== 'done')
-    else if (taskFilter === 'done') {
+    else if (taskFilter === 'needs-check') {
+      list = list.filter(
+        (t) => t.status === 'done' && !t.managerVerifiedAt && taskFinishedInRange(t, taskRange.from, taskRange.to),
+      )
+    } else if (taskFilter === 'done') {
       list = list.filter((t) => taskFinishedInRange(t, taskRange.from, taskRange.to))
     }
     return list
   }, [visibleTasks, taskFilter, taskRange])
 
   const doneInRange = visibleTasks.filter((t) => taskFinishedInRange(t, taskRange.from, taskRange.to)).length
+  const needsCheck = visibleTasks.filter(
+    (t) => t.status === 'done' && !t.managerVerifiedAt && taskFinishedInRange(t, taskRange.from, taskRange.to),
+  ).length
   const isTodayRange = taskRange.from === taskRange.to && taskRange.from === todayIso()
   const open = visibleTasks.filter((t) => t.status !== 'done').length
   const inProgress = visibleTasks.filter((t) => t.status === 'cleaning').length
@@ -144,7 +163,8 @@ export function HousekeepingPage() {
     e.preventDefault()
     const room = propertyRooms.find((r) => r.id === assignRoomId)
     if (!room || !assignStaffId) return
-    await assignRoom(room, assignStaffId)
+    await assignRoom(room, assignStaffId, assignChecklist)
+    setAssignChecklist(createDefaultChecklist())
     setTab('tasks')
     setTaskFilter('open')
     flash(`Room ${room.number} assigned to ${hkStaff.find((s) => s.id === assignStaffId)?.name}`)
@@ -197,8 +217,24 @@ export function HousekeepingPage() {
     <div>
       <PageHeader
         title="Housekeeping"
-        subtitle="Assign rooms, monitor progress, and manage your HK team — staff complete tasks in My tasks"
+        subtitle="Assign rooms, verify completed rooms in person, and manage your HK team"
       />
+
+      {needsCheck > 0 && tab === 'tasks' && taskFilter !== 'needs-check' && (
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+          <p>
+            <span className="font-semibold">{needsCheck} room{needsCheck === 1 ? '' : 's'}</span> cleaned by
+            HK — verify in person before guest handover.
+          </p>
+          <button
+            type="button"
+            onClick={() => setTaskFilter('needs-check')}
+            className="shrink-0 rounded-lg bg-amber-700 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-800"
+          >
+            Needs check →
+          </button>
+        </div>
+      )}
 
       {notice && <Notice message={notice} onDismiss={() => setNotice(null)} />}
 
@@ -232,9 +268,9 @@ export function HousekeepingPage() {
       <div className="mb-6">
         <TabGroup
           active={tab}
-          onChange={setTab}
+          onChange={(id) => setTab(id as MainTab)}
           tabs={[
-            { id: 'tasks', label: 'Tasks', count: open },
+            { id: 'tasks', label: 'Tasks', count: open || needsCheck || undefined },
             { id: 'assign', label: 'Assign' },
             { id: 'proof', label: 'Photo proof', count: withPhotos },
             { id: 'team', label: 'Team', count: hkStaff.length },
@@ -250,12 +286,13 @@ export function HousekeepingPage() {
         onChange={(from, to) => setTaskRange({ from, to })}
       />
 
-      <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4">
+      <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-4 sm:gap-4">
         <StatCard
           label={isTodayRange ? 'Done today' : 'Done in period'}
           value={doneInRange}
           tone="success"
         />
+        <StatCard label="Needs your check" value={needsCheck} tone={needsCheck > 0 ? 'warning' : 'default'} />
         <StatCard label="Assigned" value={open} tone="warning" />
         <StatCard label="In progress" value={inProgress} tone="default" />
       </div>
@@ -299,7 +336,8 @@ export function HousekeepingPage() {
                 : 'No HK staff available for this property right now. Check the Team tab or record leave if someone is off.'}
             </p>
           ) : (
-            <form onSubmit={handleAssign} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <form onSubmit={handleAssign} className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {visiblePropertyIds.length > 1 && (
                 <FormSelect
                   label="Property"
@@ -337,6 +375,8 @@ export function HousekeepingPage() {
                   Assign
                 </button>
               </div>
+              </div>
+              <AssignChecklistEditor checklist={assignChecklist} onChange={setAssignChecklist} />
             </form>
           )}
         </section>
@@ -517,20 +557,31 @@ export function HousekeepingPage() {
 
       {tab === 'tasks' && (
         <>
-          <div className="mb-4 flex gap-2">
-            {(['open', 'all', 'done'] as const).map((f) => (
+          <div className="mb-4 flex flex-wrap gap-2">
+            {(
+              [
+                { id: 'needs-check' as const, label: needsCheck > 0 ? `Needs check (${needsCheck})` : 'Needs check' },
+                { id: 'open' as const, label: 'Assigned' },
+                { id: 'all' as const, label: 'All' },
+                { id: 'done' as const, label: 'Completed' },
+              ] as const
+            ).map((f) => (
               <button
-                key={f}
+                key={f.id}
                 type="button"
-                onClick={() => setTaskFilter(f)}
+                onClick={() => setTaskFilter(f.id)}
                 className={[
-                  'rounded-full px-4 py-1.5 text-sm font-medium capitalize transition-colors',
-                  taskFilter === f
-                    ? 'bg-forest text-white'
-                    : 'bg-white text-forest/60 ring-1 ring-sand-dark hover:text-forest',
+                  'rounded-full px-4 py-1.5 text-sm font-medium transition-colors',
+                  taskFilter === f.id
+                    ? f.id === 'needs-check' && needsCheck > 0
+                      ? 'bg-amber-600 text-white'
+                      : 'bg-forest text-white'
+                    : f.id === 'needs-check' && needsCheck > 0
+                      ? 'bg-amber-50 text-amber-900 ring-1 ring-amber-300 hover:bg-amber-100'
+                      : 'bg-white text-forest/60 ring-1 ring-sand-dark hover:text-forest',
                 ].join(' ')}
               >
-                {f === 'open' ? 'Assigned' : f}
+                {f.label}
               </button>
             ))}
           </div>
@@ -538,9 +589,13 @@ export function HousekeepingPage() {
           {filteredTasks.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-sand-dark bg-white px-6 py-16 text-center">
               <p className="text-forest/50">
-                {taskFilter === 'done' ? 'No rooms marked done yet.' : 'No assigned rooms — assign a room to get started.'}
+                {taskFilter === 'needs-check'
+                  ? 'No rooms waiting for your check — HK-completed rooms appear here for physical verification.'
+                  : taskFilter === 'done'
+                    ? 'No rooms marked done yet.'
+                    : 'No assigned rooms — assign a room to get started.'}
               </p>
-              {taskFilter !== 'done' && (
+              {taskFilter === 'open' && (
                 <button
                   type="button"
                   onClick={() => setTab('assign')}
@@ -577,6 +632,19 @@ export function HousekeepingPage() {
                   </p>
 
                   <CleaningTimeInfo task={room} />
+
+                  {room.status === 'todo' && room.cleaningChecklist && room.cleaningChecklist.items.length > 0 && (
+                    <div className="mb-4 rounded-xl bg-white/70 px-3 py-2.5">
+                      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-forest/50">
+                        {room.cleaningChecklist.items.length} tasks assigned
+                      </p>
+                      <ul className="space-y-0.5 text-sm text-forest/75">
+                        {room.cleaningChecklist.items.map((item) => (
+                          <li key={item.id}>· {item.label}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
 
                   {room.status === 'cleaning' && room.cleaningChecklist && (
                     <p className="mb-4 text-sm text-forest/75">
@@ -616,6 +684,34 @@ export function HousekeepingPage() {
                     </div>
                   )}
 
+                  {room.status === 'done' && (
+                    <ManagerVerificationStatus
+                      task={room}
+                      verifying={verifyingTaskId === room.id}
+                      onVerify={async () => {
+                        if (!user?.name) return
+                        setVerifyingTaskId(room.id)
+                        try {
+                          await verifyRoomByManager(room.id, user.name)
+                          flash(`Room ${room.room} verified — ready for guest handover`)
+                        } finally {
+                          setVerifyingTaskId(null)
+                        }
+                      }}
+                    />
+                  )}
+
+                  {room.status === 'todo' && room.assignedTo && (
+                    <button
+                      type="button"
+                      onClick={() => setEditChecklistTask(room)}
+                      className="mb-3 flex w-full items-center justify-center gap-1.5 rounded-xl border border-sand-dark bg-white/80 py-2 text-sm font-medium text-forest hover:bg-sand"
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                      Edit tasks
+                    </button>
+                  )}
+
                   {room.status !== 'done' && room.assignedTo && (
                     <p className="mt-auto rounded-xl bg-white/60 px-3 py-2.5 text-center text-xs text-forest/60">
                       {room.status === 'todo'
@@ -629,6 +725,17 @@ export function HousekeepingPage() {
           )}
         </>
       )}
+
+      <EditAssignmentChecklistModal
+        open={!!editChecklistTask}
+        task={editChecklistTask}
+        onClose={() => setEditChecklistTask(null)}
+        onSave={async (checklist) => {
+          if (!editChecklistTask) return
+          await updateAssignmentChecklist(editChecklistTask.id, checklist)
+          flash(`Tasks updated for Room ${editChecklistTask.room}`)
+        }}
+      />
 
       {tab === 'proof' && (
         <section className="overflow-hidden rounded-2xl border border-sand-dark bg-sand/30 shadow-sm">

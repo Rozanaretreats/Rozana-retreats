@@ -235,7 +235,9 @@ ALTER TABLE housekeeping_tasks
   ADD COLUMN IF NOT EXISTS photo_after_url TEXT,
   ADD COLUMN IF NOT EXISTS cleaning_started_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS cleaning_finished_at TIMESTAMPTZ,
-  ADD COLUMN IF NOT EXISTS cleaning_checklist JSONB;
+  ADD COLUMN IF NOT EXISTS cleaning_checklist JSONB,
+  ADD COLUMN IF NOT EXISTS manager_verified_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS manager_verified_by TEXT;
 
 -- ── 9. Manager profiles (Supabase Auth at go-live) ──────────────────────────
 

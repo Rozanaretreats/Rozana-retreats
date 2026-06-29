@@ -8,6 +8,7 @@ import { HkPhotoProof } from '../../components/HkPhotoProof'
 import { CleaningChecklistModal } from '../../components/CleaningChecklistModal'
 import { VerificationPhotoModal } from '../../components/VerificationPhotoModal'
 import { CleaningTimeInfo } from '../../components/CleaningTimeInfo'
+import { ManagerVerificationStatus } from '../../components/ManagerVerificationStatus'
 import { StaffPortalGate } from '../../components/StaffPortalGate'
 import { useOps } from '../../context/OpsContext'
 import { formatRoomSubtitle } from '../../data/roomInventory'
@@ -169,6 +170,19 @@ function StaffMyTasksContent({ linked }: { linked: Staff }) {
 
                 <CleaningTimeInfo task={room} />
 
+                {room.status === 'todo' && room.cleaningChecklist && room.cleaningChecklist.items.length > 0 && (
+                  <div className="mb-3 rounded-xl bg-white/70 px-3 py-2.5">
+                    <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-forest/50">
+                      Your tasks ({room.cleaningChecklist.items.length})
+                    </p>
+                    <ul className="space-y-0.5 text-sm text-forest/75">
+                      {room.cleaningChecklist.items.map((item) => (
+                        <li key={item.id}>· {item.label}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 {room.status === 'cleaning' && checklistTotal > 0 && (
                   <p className="mb-3 text-sm text-forest/70">
                     Checklist: {checklistDone}/{checklistTotal} done
@@ -189,6 +203,8 @@ function StaffMyTasksContent({ linked }: { linked: Staff }) {
                     />
                   </div>
                 )}
+
+                {room.status === 'done' && <ManagerVerificationStatus task={room} />}
 
                 {room.status !== 'done' && (
                   <button
@@ -241,7 +257,7 @@ function StaffMyTasksContent({ linked }: { linked: Staff }) {
             photos,
             verification.checklist,
           )
-          flash('Room marked done — verification photos saved')
+          flash('Room marked done — awaiting manager check')
         }}
       />
     </div>

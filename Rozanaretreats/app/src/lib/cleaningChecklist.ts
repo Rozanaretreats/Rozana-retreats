@@ -20,6 +20,43 @@ export function createDefaultChecklist(): CleaningChecklist {
   }
 }
 
+const DEFAULT_ITEM_IDS = new Set(DEFAULT_CHECKLIST_ITEMS.map((item) => item.id))
+
+export function isDefaultChecklistItemId(id: string): boolean {
+  return DEFAULT_ITEM_IDS.has(id)
+}
+
+export function createCustomChecklistItem(label: string): ChecklistItem {
+  const trimmed = label.trim()
+  if (!trimmed) throw new Error('Task label is required')
+  return {
+    id: `custom-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    label: trimmed,
+  }
+}
+
+export function addChecklistItem(checklist: CleaningChecklist, label: string): CleaningChecklist {
+  return {
+    ...checklist,
+    items: [...checklist.items, createCustomChecklistItem(label)],
+  }
+}
+
+export function removeChecklistItem(checklist: CleaningChecklist, itemId: string): CleaningChecklist {
+  if (checklist.items.length <= 1) return checklist
+  return {
+    ...checklist,
+    items: checklist.items.filter((item) => item.id !== itemId),
+  }
+}
+
+/** Fresh checklist for assignment — no completion timestamps */
+export function checklistForAssignment(checklist: CleaningChecklist): CleaningChecklist {
+  return {
+    items: checklist.items.map(({ id, label }) => ({ id, label })),
+  }
+}
+
 export function allChecklistItemsComplete(checklist: CleaningChecklist | undefined): boolean {
   if (!checklist?.items.length) return false
   return checklist.items.every((item) => !!item.completedAt)

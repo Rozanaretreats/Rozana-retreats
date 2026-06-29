@@ -6,6 +6,7 @@ const staffStyles: Record<StaffStatus, string> = {
   absent: 'bg-red-100 text-red-800',
   'not-in': 'bg-sand-dark text-forest/60',
   'awaiting-checkin': 'bg-orange-100 text-orange-900',
+  inconsistent: 'bg-purple-100 text-purple-900',
 }
 
 const staffLabels: Record<StaffStatus, string> = {
@@ -14,6 +15,7 @@ const staffLabels: Record<StaffStatus, string> = {
   absent: 'Absent',
   'not-in': 'Not in yet',
   'awaiting-checkin': 'Action needed',
+  inconsistent: 'Leave + punch',
 }
 
 const roomStyles: Record<RoomStatus, string> = {

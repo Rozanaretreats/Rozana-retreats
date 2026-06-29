@@ -1,22 +1,34 @@
 const DISPLAY: Intl.DateTimeFormatOptions = { day: 'numeric', month: 'short' }
 
-export function todayIso(): string {
-  return new Date().toISOString().slice(0, 10)
+/** Resort operations timezone — kiosk punch_date and Ops "today" must match. */
+export const PROPERTY_TIMEZONE = 'Asia/Kolkata'
+
+function formatIsoDateInTz(date: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date)
 }
 
-export function daysAgoIso(days: number): string {
+export function todayIso(timeZone = PROPERTY_TIMEZONE): string {
+  return formatIsoDateInTz(new Date(), timeZone)
+}
+
+export function daysAgoIso(days: number, timeZone = PROPERTY_TIMEZONE): string {
   const d = new Date()
   d.setDate(d.getDate() - days)
-  return d.toISOString().slice(0, 10)
+  return formatIsoDateInTz(d, timeZone)
 }
 
-export function daysAheadIso(days: number): string {
+export function daysAheadIso(days: number, timeZone = PROPERTY_TIMEZONE): string {
   const d = new Date()
   d.setDate(d.getDate() + days)
-  return d.toISOString().slice(0, 10)
+  return formatIsoDateInTz(d, timeZone)
 }
 
-export function startOfMonthIso(day = todayIso()): string {
+export function startOfMonthIso(day = todayIso(), _timeZone = PROPERTY_TIMEZONE): string {
   return day.slice(0, 8) + '01'
 }
 
@@ -56,9 +68,11 @@ export function rangesOverlap(aFrom: string, aTo: string, bFrom: string, bTo: st
   return aFrom <= bTo && aTo >= bFrom
 }
 
-export function isoFromTimestamp(ts?: string): string | null {
+export function isoFromTimestamp(ts?: string, timeZone = PROPERTY_TIMEZONE): string | null {
   if (!ts) return null
-  return ts.slice(0, 10)
+  const d = new Date(ts)
+  if (Number.isNaN(d.getTime())) return ts.slice(0, 10)
+  return formatIsoDateInTz(d, timeZone)
 }
 
 export function formatPeriodLabel(from: string, to: string): string {

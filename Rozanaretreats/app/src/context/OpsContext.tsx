@@ -26,7 +26,7 @@ import { todayIso } from '../lib/dates'
 import { MANUAL_PUNCH_DEVICE_ID, nowPunchTime, allowManualPunches } from '../lib/manualPunch'
 import { uploadHkPhoto } from '../lib/hkPhotos'
 import * as api from '../lib/opsApi'
-import { createDefaultChecklist } from '../lib/cleaningChecklist'
+import { createDefaultChecklist, checklistForAssignment } from '../lib/cleaningChecklist'
 import {
   deleteStaffLogin,
   fetchStaffLoginMeta,
@@ -99,7 +99,8 @@ interface OpsContextValue {
   recordManualPunch: (staffId: string, type: 'in' | 'out') => Promise<void>
   clearManualPunchesForStaff: (staffId: string) => Promise<void>
 
-  assignRoom: (room: Room, staffId: string) => Promise<RoomTask>
+  assignRoom: (room: Room, staffId: string, checklist?: CleaningChecklist) => Promise<RoomTask>
+  updateAssignmentChecklist: (taskId: string, checklist: CleaningChecklist) => Promise<void>
   startCleaningWithChecklist: (taskId: string) => Promise<void>
   updateCleaningChecklist: (taskId: string, checklist: CleaningChecklist) => Promise<void>
   finishCleaningWithVerification: (
@@ -107,6 +108,7 @@ interface OpsContextValue {
     photos: { itemId: string; itemLabel: string; file: File }[],
     checklist: CleaningChecklist,
   ) => Promise<void>
+  verifyRoomByManager: (taskId: string, verifiedBy: string) => Promise<void>
   unassignTask: (taskId: string) => Promise<void>
 
   getStaffById: (id: string) => Staff | undefined
@@ -184,18 +186,31 @@ export function OpsProvider({ children }: { children: ReactNode }) {
   const staffBaseRef = useRef(staffBase)
   staffBaseRef.current = staffBase
 
+  const liveDisconnectedRef = useRef(false)
+
   /** Live sync: kiosk punches appear in Ops without refresh. */
   useEffect(() => {
     if (dataSource !== 'supabase') return
 
-    return api.subscribeAttendanceInserts((row) => {
-      setPunches((prev) => {
-        if (prev.some((p) => p.id === row.id)) return prev
-        const staffName = staffBaseRef.current.find((s) => s.id === row.staff_id)?.name
-        return [api.mapPunchRow(row, staffName), ...prev]
-      })
-    })
-  }, [dataSource])
+    return api.subscribeAttendanceInserts(
+      (row) => {
+        setPunches((prev) => {
+          if (prev.some((p) => p.id === row.id)) return prev
+          const staffName = staffBaseRef.current.find((s) => s.id === row.staff_id)?.name
+          return [api.mapPunchRow(row, staffName), ...prev]
+        })
+      },
+      (status) => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          liveDisconnectedRef.current = true
+        }
+        if (status === 'SUBSCRIBED' && liveDisconnectedRef.current) {
+          liveDisconnectedRef.current = false
+          void reload()
+        }
+      },
+    )
+  }, [dataSource, reload])
 
   const staff = useMemo(
     () => withDerivedStatus(staffBase, leaves, punches, absences, shifts),
@@ -519,9 +534,14 @@ export function OpsProvider({ children }: { children: ReactNode }) {
     )
   }
 
-  const assignRoom = async (room: Room, staffId: string): Promise<RoomTask> => {
+  const assignRoom = async (
+    room: Room,
+    staffId: string,
+    checklist?: CleaningChecklist,
+  ): Promise<RoomTask> => {
     const member = staffBase.find((s) => s.id === staffId)
     const existing = tasks.find((t) => t.roomId === room.id)
+    const assignmentChecklist = checklistForAssignment(checklist ?? createDefaultChecklist())
 
     const task: RoomTask = {
       id: existing?.id ?? `task-${room.id}-${Date.now()}`,
@@ -532,7 +552,12 @@ export function OpsProvider({ children }: { children: ReactNode }) {
       roomType: room.type,
       assignedStaffId: staffId,
       assignedTo: member?.name,
-      status: existing?.status === 'done' ? 'todo' : (existing?.status ?? 'todo'),
+      status: 'todo',
+      cleaningChecklist: assignmentChecklist,
+      cleaningStartedAt: undefined,
+      cleaningFinishedAt: undefined,
+      photoBeforeUrl: undefined,
+      photoAfterUrl: undefined,
     }
 
     if (dataSource === 'supabase') {
@@ -542,6 +567,7 @@ export function OpsProvider({ children }: { children: ReactNode }) {
         roomId: task.roomId,
         assignedStaffId: staffId,
         status: task.status,
+        cleaningChecklist: assignmentChecklist,
       })
       await reload()
       return task
@@ -552,8 +578,28 @@ export function OpsProvider({ children }: { children: ReactNode }) {
     return task
   }
 
+  const updateAssignmentChecklist = async (taskId: string, checklist: CleaningChecklist) => {
+    const assignmentChecklist = checklistForAssignment(checklist)
+
+    if (dataSource === 'supabase') {
+      await api.updateAssignmentChecklist(taskId, assignmentChecklist)
+      await reload()
+      return
+    }
+
+    persistTasksLocal(
+      tasks.map((t) =>
+        t.id === taskId ? { ...t, cleaningChecklist: assignmentChecklist } : t,
+      ),
+    )
+  }
+
   const startCleaningWithChecklist = async (taskId: string) => {
-    const checklist = createDefaultChecklist()
+    const existing = tasks.find((t) => t.id === taskId)
+    const checklist =
+      existing?.cleaningChecklist?.items.length
+        ? existing.cleaningChecklist
+        : createDefaultChecklist()
     const now = new Date().toISOString()
 
     if (dataSource === 'supabase') {
@@ -573,6 +619,8 @@ export function OpsProvider({ children }: { children: ReactNode }) {
               photoBeforeUrl: undefined,
               photoAfterUrl: undefined,
               cleaningFinishedAt: undefined,
+              managerVerifiedAt: undefined,
+              managerVerifiedBy: undefined,
             }
           : t,
       ),
@@ -636,7 +684,27 @@ export function OpsProvider({ children }: { children: ReactNode }) {
               photoAfterUrl,
               cleaningChecklist: finalChecklist,
               cleaningFinishedAt: now,
+              managerVerifiedAt: undefined,
+              managerVerifiedBy: undefined,
             }
+          : t,
+      ),
+    )
+  }
+
+  const verifyRoomByManager = async (taskId: string, verifiedBy: string) => {
+    const now = new Date().toISOString()
+
+    if (dataSource === 'supabase') {
+      await api.verifyRoomByManager(taskId, verifiedBy)
+      await reload()
+      return
+    }
+
+    persistTasksLocal(
+      tasks.map((t) =>
+        t.id === taskId && t.status === 'done' && !t.managerVerifiedAt
+          ? { ...t, managerVerifiedAt: now, managerVerifiedBy: verifiedBy }
           : t,
       ),
     )
@@ -661,6 +729,8 @@ export function OpsProvider({ children }: { children: ReactNode }) {
               cleaningStartedAt: undefined,
               cleaningFinishedAt: undefined,
               cleaningChecklist: undefined,
+              managerVerifiedAt: undefined,
+              managerVerifiedBy: undefined,
             }
           : t,
       ),
@@ -692,9 +762,11 @@ export function OpsProvider({ children }: { children: ReactNode }) {
         recordManualPunch,
         clearManualPunchesForStaff,
         assignRoom,
+        updateAssignmentChecklist,
         startCleaningWithChecklist,
         updateCleaningChecklist,
         finishCleaningWithVerification,
+        verifyRoomByManager,
         unassignTask,
         getStaffById,
       }}

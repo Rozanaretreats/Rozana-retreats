@@ -1,4 +1,5 @@
 import { supabase } from './supabase'
+import { userFromSession } from './sessionUser'
 import { demoUsers } from '../data/mockData'
 import type { PropertyId, User } from '../types'
 
@@ -33,11 +34,6 @@ function writeRpcAvailabilityCache(ready: boolean) {
   } catch {
     /* ignore */
   }
-}
-
-function markRpcUnavailable() {
-  staffLoginRpcReady = false
-  writeRpcAvailabilityCache(false)
 }
 
 type StoredLogin = StaffLoginMeta & { password: string }
@@ -85,30 +81,7 @@ function isRpcMissing(error: RpcError): boolean {
   )
 }
 
-function isRlsDenied(error: RpcError): boolean {
-  if (!error) return false
-  return error.code === '42501' || /row-level security/i.test(error.message ?? '')
-}
-
-function staffLoginConfigError(rpcError: RpcError, legacyError?: RpcError): Error {
-  if (isRpcMissing(rpcError)) {
-    const detail = legacyError?.message ? ` Table fallback: ${legacyError.message}` : ''
-    return new Error(STAFF_LOGIN_SQL_HINT + detail)
-  }
-  if (legacyError && isRlsDenied(legacyError)) {
-    return new Error(STAFF_LOGIN_SQL_HINT)
-  }
-  return new Error(legacyError?.message ?? rpcError?.message ?? 'Staff login failed')
-}
-
-type VerifyStaffLoginRow = {
-  staff_id: string
-  email: string
-  name: string
-  property_id: PropertyId
-}
-
-/** null = not probed yet · true = rozana_* RPCs work · false = use table fallback only */
+/** null = not probed yet · true = rozana_* RPCs work · false = unavailable */
 let staffLoginRpcReady: boolean | null = readRpcAvailabilityCache()
 let probePromise: Promise<boolean> | null = null
 
@@ -127,47 +100,6 @@ async function probeStaffLoginRpc(): Promise<boolean> {
   }
 
   return probePromise
-}
-
-async function rpcVerify(email: string, password: string) {
-  if (!supabase) return { data: null, error: null as RpcError, attempted: false }
-
-  if (!(await probeStaffLoginRpc())) {
-    return { data: null, error: null as RpcError, attempted: false }
-  }
-
-  const result = await supabase.rpc('rozana_verify_staff_login', {
-    body: { login_email: email, login_password: password },
-  })
-  if (isRpcMissing(result.error)) markRpcUnavailable()
-  return { ...result, attempted: true }
-}
-
-async function rpcUpsert(staffId: string, email: string, password: string) {
-  if (!supabase) return { error: null as RpcError, attempted: false }
-
-  if (!(await probeStaffLoginRpc())) {
-    return { error: null as RpcError, attempted: false }
-  }
-
-  const result = await supabase.rpc('rozana_upsert_staff_login', {
-    body: { staff_id: staffId, email, password },
-  })
-  if (isRpcMissing(result.error)) markRpcUnavailable()
-  return { ...result, attempted: true }
-}
-
-async function rpcDelete(staffId: string) {
-  if (!supabase) return { error: null as RpcError, attempted: false }
-
-  if (!(await probeStaffLoginRpc())) {
-    return { error: null as RpcError, attempted: false }
-  }
-
-  const result = await supabase.rpc('rozana_delete_staff_login', {
-    body: { staff_id: staffId },
-  })
-  return { ...result, attempted: true }
 }
 
 async function rpcEmailTaken(email: string, excludeStaffId?: string) {
@@ -208,14 +140,6 @@ export async function fetchStaffLoginMeta(): Promise<{ staffId: string; email: s
     }))
   }
 
-  const legacy = await supabase.from('staff_logins').select('staff_id, email')
-  if (!legacy.error) {
-    return (legacy.data ?? []).map((row) => ({
-      staffId: row.staff_id as string,
-      email: row.email as string,
-    }))
-  }
-
   console.warn(STAFF_LOGIN_SQL_HINT)
   return []
 }
@@ -243,25 +167,24 @@ export async function insertStaffLogin(input: {
     return
   }
 
-  const rpc = await rpcUpsert(input.staffId, email, input.password)
-  if (rpc.attempted && !rpc.error) return
-
-  const legacy = await supabase.from('staff_logins').upsert(
-    { staff_id: input.staffId, email, password: input.password },
-    { onConflict: 'staff_id' },
-  )
-
-  if (legacy.error) {
-    throw staffLoginConfigError(rpc.error, legacy.error)
-  }
+  const { error } = await supabase.functions.invoke('provision-staff-auth', {
+    body: {
+      action: 'provision',
+      staff_id: input.staffId,
+      email,
+      password: input.password,
+      name: input.name,
+      property_id: input.propertyId,
+    },
+  })
+  if (error) throw new Error(error.message ?? 'Failed to create staff login')
 }
 
 export async function resetStaffLoginPassword(
   staffId: string,
-  email: string,
+  _email: string,
   password: string,
 ): Promise<void> {
-  const normalizedEmail = email.trim().toLowerCase()
   if (!password.trim()) {
     throw new Error('Password is required.')
   }
@@ -277,17 +200,29 @@ export async function resetStaffLoginPassword(
     return
   }
 
-  const rpc = await rpcUpsert(staffId, normalizedEmail, password)
-  if (rpc.attempted && !rpc.error) return
-
-  const legacy = await supabase.from('staff_logins').upsert(
-    { staff_id: staffId, email: normalizedEmail, password },
-    { onConflict: 'staff_id' },
+  const { data: meta } = await supabase.rpc('rozana_list_staff_login_emails')
+  const row = ((meta ?? []) as { staff_id: string; email: string }[]).find(
+    (r) => r.staff_id === staffId,
   )
+  if (!row) throw new Error('No app login found for this staff member.')
 
-  if (legacy.error) {
-    throw staffLoginConfigError(rpc.error, legacy.error)
-  }
+  const { data: staffRow } = await supabase
+    .from('staff')
+    .select('name, property_id')
+    .eq('id', staffId)
+    .maybeSingle()
+
+  const { error } = await supabase.functions.invoke('provision-staff-auth', {
+    body: {
+      action: 'provision',
+      staff_id: staffId,
+      email: row.email,
+      password,
+      name: staffRow?.name ?? row.email,
+      property_id: staffRow?.property_id,
+    },
+  })
+  if (error) throw new Error(error.message ?? 'Failed to reset password')
 }
 
 export async function deleteStaffLogin(staffId: string): Promise<void> {
@@ -296,11 +231,10 @@ export async function deleteStaffLogin(staffId: string): Promise<void> {
     return
   }
 
-  const rpc = await rpcDelete(staffId)
-  if (rpc.attempted && !rpc.error) return
-
-  const legacy = await supabase.from('staff_logins').delete().eq('staff_id', staffId)
-  if (legacy.error) throw staffLoginConfigError(rpc.error, legacy.error)
+  const { error } = await supabase.functions.invoke('provision-staff-auth', {
+    body: { action: 'delete', staff_id: staffId },
+  })
+  if (error) throw new Error(error.message ?? 'Failed to delete staff login')
 }
 
 export async function isStaffLoginEmailTaken(
@@ -320,50 +254,7 @@ export async function isStaffLoginEmailTaken(
 
   if (!error && typeof data === 'boolean') return data
 
-  const legacy = await supabase
-    .from('staff_logins')
-    .select('staff_id')
-    .eq('email', normalized)
-    .maybeSingle()
-
-  if (legacy.error || !legacy.data) return false
-  return legacy.data.staff_id !== excludeStaffId
-}
-
-async function loginViaStaffLoginsTable(
-  normalized: string,
-  password: string,
-): Promise<User | null> {
-  if (!supabase) return null
-
-  const legacy = await supabase
-    .from('staff_logins')
-    .select('staff_id, email, password, staff:staff_id(name, property_id, active)')
-    .eq('email', normalized)
-    .maybeSingle()
-
-  if (legacy.error || !legacy.data) return null
-
-  const stored = legacy.data.password as string
-  const plainOk = stored === password
-  if (!plainOk) return null
-
-  const staffRow = legacy.data.staff
-  const staff = (Array.isArray(staffRow) ? staffRow[0] : staffRow) as {
-    name: string
-    property_id: PropertyId
-    active: boolean
-  } | null
-  if (!staff?.active) return null
-
-  return {
-    id: `login-${legacy.data.staff_id}`,
-    name: staff.name,
-    role: 'housekeeping-staff',
-    propertyId: staff.property_id,
-    email: legacy.data.email,
-    staffId: legacy.data.staff_id,
-  }
+  return false
 }
 
 export async function authenticateStaffLogin(
@@ -393,29 +284,11 @@ export async function authenticateStaffLogin(
     }
   }
 
-  // Table login first — avoids RPC 404 noise when fallback is what works
-  const tableUser = await loginViaStaffLoginsTable(normalized, password)
-  if (tableUser) return tableUser
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email: normalized,
+    password,
+  })
+  if (error || !data.session) return null
 
-  const { data, error: rpcError, attempted } = await rpcVerify(normalized, password)
-
-  if (attempted && !rpcError && data && typeof data === 'object') {
-    const row = data as VerifyStaffLoginRow
-    if (row.staff_id && row.name && row.property_id) {
-      return {
-        id: `login-${row.staff_id}`,
-        name: row.name,
-        role: 'housekeeping-staff',
-        propertyId: row.property_id,
-        email: row.email,
-        staffId: row.staff_id,
-      }
-    }
-  }
-
-  if (attempted && rpcError && !isRpcMissing(rpcError)) {
-    console.warn('Staff login RPC error', rpcError.message)
-  }
-
-  return null
+  return userFromSession(data.session)
 }

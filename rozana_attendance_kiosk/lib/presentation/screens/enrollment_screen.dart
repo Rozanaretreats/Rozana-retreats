@@ -189,7 +189,10 @@ class _EnrollmentScreenState extends ConsumerState<EnrollmentScreen> {
     if (text.contains('duplicate key') || text.contains('23505')) {
       return 'Fingerprint already enrolled. Tap Re-enrol to replace, or Delete first.';
     }
-    if (text.contains('fingerprint_templates')) {
+    if (text.contains('42501') || text.contains('row-level security')) {
+      return 'Kiosk not registered in Supabase. Ask admin to add this device_id.';
+    }
+    if (text.contains('fingerprint_templates') && text.contains('does not exist')) {
       return 'Database not ready. Run kiosk_migrations.sql in Supabase.';
     }
     return 'Something went wrong. Try again.';

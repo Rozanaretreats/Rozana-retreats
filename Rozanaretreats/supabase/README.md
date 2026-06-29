@@ -35,9 +35,9 @@ kannur-beachview  →  8 rooms
 ### App env (`app/.env.local`)
 
 ```env
-VITE_SUPABASE_URL=...
-VITE_SUPABASE_ANON_KEY=...
-VITE_ALLOW_MANUAL_PUNCHES=true
+VITE_SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
+VITE_SUPABASE_ANON_KEY=sb_publishable_...   # not the legacy JWT anon key
+VITE_ALLOW_MANUAL_PUNCHES=false             # true only for local pre-biometric testing
 ```
 
 Restart `npm run dev` after env changes.

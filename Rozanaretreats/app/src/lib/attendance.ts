@@ -56,7 +56,7 @@ export function formatDuration(mins: number): string {
   return `${h}h ${String(m).padStart(2, '0')}m`
 }
 
-/** AT02 — hours from first check-in to last check-out today */
+/** AT02 — hours from first check-in to last check-out after that IN today */
 export function computeHoursToday(
   punches: BiometricPunch[],
   staffId: string,
@@ -64,12 +64,18 @@ export function computeHoursToday(
 ): string | null {
   const staffPunches = punchesForToday(punches, day)
     .filter((p) => p.staffId === staffId)
-    .sort((a, b) => parsePunchMinutes(a.timestamp) - parsePunchMinutes(b.timestamp))
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
 
   const firstIn = staffPunches.find((p) => p.type === 'in')
   if (!firstIn) return null
 
-  const lastOut = [...staffPunches].reverse().find((p) => p.type === 'out')
+  let lastOut: BiometricPunch | undefined
+  for (const p of staffPunches) {
+    if (p.type !== 'out') continue
+    if (p.timestamp <= firstIn.timestamp) continue
+    if (!lastOut || p.timestamp > lastOut.timestamp) lastOut = p
+  }
+
   if (!lastOut) return 'On site'
 
   const mins = parsePunchMinutes(lastOut.timestamp) - parsePunchMinutes(firstIn.timestamp)

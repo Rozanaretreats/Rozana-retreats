@@ -82,6 +82,10 @@ class ProcessPunchUseCase {
         return const PunchNoMatch('Staff not found on roster');
       }
 
+      if (await _repository.isOnline) {
+        await _repository.refreshCache();
+      }
+
       final now = DateTime.now();
       final todayPunches = await _repository.getTodayPunches(now);
 

@@ -41,6 +41,8 @@ type Task = {
   assigned_staff_id: string | null;
   status: "todo" | "cleaning" | "done";
   photo_after_url: string | null;
+  cleaning_finished_at: string | null;
+  manager_verified_at: string | null;
 };
 
 function istToday(): string {
@@ -50,6 +52,18 @@ function istToday(): string {
     month: "2-digit",
     day: "2-digit",
   }).format(new Date());
+}
+
+function isoDateInTz(iso: string | null | undefined, timeZone = "Asia/Kolkata"): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
 }
 
 function hhmm(time: string | undefined): string {
@@ -70,7 +84,7 @@ function latestOutAfterIn(staffId: string, firstInTime: string, punchList: Punch
 
 Deno.serve(async (req: Request) => {
   const cors = {
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": Deno.env.get("OPS_APP_ORIGIN") ?? "http://localhost:5173",
     "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   };
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -127,11 +141,11 @@ Deno.serve(async (req: Request) => {
       if (!force) {
         const { data: existing } = await supabase
           .from("report_send_log")
-          .select("id")
+          .select("id, status")
           .eq("report_date", date)
           .eq("property_id", property.id)
           .maybeSingle();
-        if (existing) {
+        if (existing?.status === "sent") {
           results.push({ property: property.id, delivered: false, reason: "already_sent" });
           continue;
         }
@@ -198,7 +212,9 @@ async function buildReport(
       supabase.from("rooms").select("id, number, building").eq("property_id", property.id),
       supabase
         .from("housekeeping_tasks")
-        .select("id, room_id, assigned_staff_id, status, photo_after_url")
+        .select(
+          "id, room_id, assigned_staff_id, status, photo_after_url, cleaning_finished_at, manager_verified_at",
+        )
         .eq("property_id", property.id),
     ]);
 
@@ -240,17 +256,26 @@ async function buildReport(
     }
   }
 
-  // Housekeeping
+  // Housekeeping — scoped to report day (IST)
   const taskList = (tasks ?? []) as Task[];
-  const assigned = taskList.filter((t) => t.assigned_staff_id);
-  const doneTasks = taskList.filter((t) => t.status === "done");
+  const doneTasks = taskList.filter(
+    (t) => t.status === "done" && isoDateInTz(t.cleaning_finished_at) === date,
+  );
   const outstanding = taskList.filter((t) => t.assigned_staff_id && t.status !== "done");
+  const assignedToday = taskList.filter(
+    (t) =>
+      t.assigned_staff_id &&
+      (t.status !== "done" || isoDateInTz(t.cleaning_finished_at) === date),
+  );
   const unproven = doneTasks.filter((t) => !t.photo_after_url);
+  const awaitingManager = doneTasks.filter((t) => !t.manager_verified_at);
+  const verified = doneTasks.filter((t) => t.manager_verified_at);
 
   const doneLines = doneTasks.map((t) => {
     const who = t.assigned_staff_id ? staffName.get(t.assigned_staff_id) ?? "?" : "unassigned";
     const proof = t.photo_after_url ? " 📸" : " ⚠️ no photo";
-    return `  ✅ ${roomLabel.get(t.room_id) ?? t.room_id} · ${who}${proof}`;
+    const check = t.manager_verified_at ? " ✓ mgr" : " ⏳ await mgr";
+    return `  ✅ ${roomLabel.get(t.room_id) ?? t.room_id} · ${who}${proof}${check}`;
   });
 
   const outstandingLines = outstanding.map((t) => {
@@ -274,7 +299,7 @@ async function buildReport(
   lines.push(`❌ *Absent / not in* (${missing.length})`);
   lines.push(missing.length ? missing.join("\n") : "  — none");
   lines.push("");
-  lines.push(`🧹 *HOUSEKEEPING* · ${doneTasks.length}/${assigned.length} rooms done`);
+  lines.push(`🧹 *HOUSEKEEPING* · ${doneTasks.length}/${assignedToday.length} rooms done today`);
   if (doneLines.length) lines.push(doneLines.join("\n"));
   else lines.push("  — none completed");
   if (outstanding.length) {
@@ -284,7 +309,14 @@ async function buildReport(
   }
   if (unproven.length) {
     lines.push("");
-    lines.push(`📷 ${unproven.length} room(s) done without photo proof`);
+    lines.push(`📷 ${unproven.length} room(s) done today without photo proof`);
+  }
+  if (awaitingManager.length) {
+    lines.push("");
+    lines.push(`🛡️ ${awaitingManager.length} room(s) awaiting manager physical check`);
+  }
+  if (verified.length) {
+    lines.push(`✓ ${verified.length} room(s) verified by manager — guest-ready`);
   }
   lines.push("");
   lines.push(`📱 *View proof photos:* Rozana Ops → Reports → Housekeeping`);

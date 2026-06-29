@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Navigate, useNavigate } from 'react-router-dom'
-import { ArrowRight, Leaf, Lock } from 'lucide-react'
+import { ArrowRight, Eye, EyeOff, Leaf, Lock } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { homePathForUser } from '../lib/homeRoute'
 import { demoUsers } from '../data/mockData'
@@ -32,6 +32,7 @@ export function LoginPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
 
   if (user) return <Navigate to={homePathForUser(user)} replace />
 
@@ -131,14 +132,28 @@ export function LoginPage() {
             <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-forest/45">
               Password
             </span>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className={inputClass}
-              placeholder="••••••••"
-              autoComplete="current-password"
-            />
+            <div className="relative">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className={`${inputClass} pr-11`}
+                placeholder="••••••••"
+                autoComplete="current-password"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-1 text-forest/40 transition-colors hover:text-forest/70"
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+              >
+                {showPassword ? (
+                  <EyeOff className="h-4 w-4" strokeWidth={2} />
+                ) : (
+                  <Eye className="h-4 w-4" strokeWidth={2} />
+                )}
+              </button>
+            </div>
           </label>
 
           <p className="mb-7 text-xs leading-relaxed text-forest/50">
@@ -156,6 +171,7 @@ export function LoginPage() {
           </button>
         </form>
 
+        {import.meta.env.DEV && (
         <div className="mt-8 hidden sm:block">
           <p className="mb-3 text-center text-[11px] font-semibold uppercase tracking-[0.2em] text-forest/40">
             Demo access
@@ -183,6 +199,7 @@ export function LoginPage() {
             ))}
           </div>
         </div>
+        )}
       </div>
     </div>
   )

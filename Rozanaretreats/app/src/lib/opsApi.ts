@@ -77,6 +77,8 @@ type DbTask = {
   cleaning_started_at: string | null
   cleaning_finished_at: string | null
   cleaning_checklist: CleaningChecklist | null
+  manager_verified_at: string | null
+  manager_verified_by: string | null
   room: { number: string; building: string; room_type: RoomType } | null
   staff: { name: string } | null
 }
@@ -133,6 +135,8 @@ function mapTask(row: DbTask, activeStaffIds?: Set<string>): RoomTask {
     cleaningStartedAt: row.cleaning_started_at ?? undefined,
     cleaningFinishedAt: row.cleaning_finished_at ?? undefined,
     cleaningChecklist: row.cleaning_checklist ?? undefined,
+    managerVerifiedAt: row.manager_verified_at ?? undefined,
+    managerVerifiedBy: row.manager_verified_by ?? undefined,
   }
 }
 
@@ -315,8 +319,10 @@ export async function upsertTask(input: {
   roomId: string
   assignedStaffId: string
   status: RoomStatus
+  cleaningChecklist?: CleaningChecklist
 }): Promise<void> {
   if (!supabase) return
+  const now = new Date().toISOString()
   const { error } = await supabase.from('housekeeping_tasks').upsert(
     {
       id: input.id,
@@ -324,10 +330,30 @@ export async function upsertTask(input: {
       room_id: input.roomId,
       assigned_staff_id: input.assignedStaffId,
       status: input.status,
-      updated_at: new Date().toISOString(),
+      cleaning_checklist: input.cleaningChecklist ?? null,
+      cleaning_started_at: null,
+      cleaning_finished_at: null,
+      photo_before_url: null,
+      photo_after_url: null,
+      updated_at: now,
     },
     { onConflict: 'room_id' },
   )
+  if (error) throw error
+}
+
+export async function updateAssignmentChecklist(
+  id: string,
+  checklist: CleaningChecklist,
+): Promise<void> {
+  if (!supabase) return
+  const { error } = await supabase
+    .from('housekeeping_tasks')
+    .update({
+      cleaning_checklist: checklist,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', id)
   if (error) throw error
 }
 
@@ -375,6 +401,8 @@ export async function startCleaningWithChecklist(
       cleaning_finished_at: null,
       photo_before_url: null,
       photo_after_url: null,
+      manager_verified_at: null,
+      manager_verified_by: null,
       updated_at: now,
     })
     .eq('id', id)
@@ -410,9 +438,27 @@ export async function finishCleaningWithVerification(
       photo_after_url: photoAfterUrl,
       cleaning_checklist: checklist,
       cleaning_finished_at: now,
+      manager_verified_at: null,
+      manager_verified_by: null,
       updated_at: now,
     })
     .eq('id', id)
+  if (error) throw error
+}
+
+export async function verifyRoomByManager(id: string, verifiedBy: string): Promise<void> {
+  if (!supabase) return
+  const now = new Date().toISOString()
+  const { error } = await supabase
+    .from('housekeeping_tasks')
+    .update({
+      manager_verified_at: now,
+      manager_verified_by: verifiedBy,
+      updated_at: now,
+    })
+    .eq('id', id)
+    .eq('status', 'done')
+    .is('manager_verified_at', null)
   if (error) throw error
 }
 
@@ -508,6 +554,8 @@ const TASK_RESET_FIELDS = {
   photo_after_url: null,
   cleaning_started_at: null,
   cleaning_finished_at: null,
+  manager_verified_at: null,
+  manager_verified_by: null,
 }
 
 export async function clearTaskAssignment(id: string): Promise<void> {
@@ -581,6 +629,7 @@ export async function insertManualPunch(input: {
     punch_date: input.date,
     punch_time: input.time,
     device_id: MANUAL_PUNCH_DEVICE_ID,
+    source: 'manual',
   })
   if (error) throw error
 }
@@ -602,6 +651,7 @@ export async function deleteManualPunchesForStaffOnDate(
 /** Live kiosk → Ops sync when a new punch is inserted. */
 export function subscribeAttendanceInserts(
   onInsert: (row: DbPunch) => void,
+  onStatus?: (status: string) => void,
 ): () => void {
   if (!supabase) return () => {}
 
@@ -615,7 +665,9 @@ export function subscribeAttendanceInserts(
         onInsert(payload.new as DbPunch)
       },
     )
-    .subscribe()
+    .subscribe((status) => {
+      onStatus?.(status)
+    })
 
   return () => {
     void client.removeChannel(channel)

@@ -2,7 +2,7 @@ export type PropertyId = 'ooty-skyview' | 'kannur-beachview'
 
 export type UserRole = 'owner' | 'operations-manager' | 'housekeeping-staff'
 
-export type StaffStatus = 'present' | 'absent' | 'on-leave' | 'not-in' | 'awaiting-checkin'
+export type StaffStatus = 'present' | 'absent' | 'on-leave' | 'not-in' | 'awaiting-checkin' | 'inconsistent'
 
 export type RoomStatus = 'todo' | 'cleaning' | 'done'
 
@@ -129,4 +129,7 @@ export interface RoomTask {
   cleaningStartedAt?: string
   cleaningFinishedAt?: string
   cleaningChecklist?: CleaningChecklist
+  /** Set when operations manager physically verifies the room */
+  managerVerifiedAt?: string
+  managerVerifiedBy?: string
 }

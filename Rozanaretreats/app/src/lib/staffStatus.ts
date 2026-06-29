@@ -21,18 +21,18 @@ export function deriveStaffStatus(
   day = todayIso(),
   now = new Date(),
 ): StaffStatus {
-  if (
-    leaves.some(
-      (l) => l.staffId === staffId && isApprovedLeave(l) && isOnLeaveToday(l.fromDate, l.toDate, day),
-    )
-  ) {
-    return 'on-leave'
-  }
-
-  const punchedIn = punches.some(
-    (p) => p.staffId === staffId && p.type === 'in' && p.date === day,
+  const punchedIn = punches
+    .filter((p) => p.staffId === staffId && p.date === day)
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+  const onLeaveToday = leaves.some(
+    (l) => l.staffId === staffId && isApprovedLeave(l) && isOnLeaveToday(l.fromDate, l.toDate, day),
   )
-  if (punchedIn) return 'present'
+  if (onLeaveToday && punchedIn.length > 0) return 'inconsistent'
+
+  const lastPunch = punchedIn[punchedIn.length - 1]
+  if (lastPunch?.type === 'in') return 'present'
+
+  if (onLeaveToday) return 'on-leave'
 
   const marked = absences.find((a) => a.staffId === staffId && a.absenceDate === day)
   if (marked) return 'absent'

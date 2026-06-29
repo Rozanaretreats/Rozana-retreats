@@ -42,12 +42,25 @@ class AppConfig {
     final readerEnv = dotenv.maybeGet('FINGERPRINT_READER') ?? 'mock';
     final effectiveReader = kDebugMode && readerEnv.isEmpty ? 'mock' : readerEnv;
 
+    if (kReleaseMode && effectiveReader.toLowerCase() != 'native') {
+      throw StateError(
+        'Release builds require FINGERPRINT_READER=native. Mock mode is not allowed in production.',
+      );
+    }
+
+    final adminPin = dotenv.maybeGet('ADMIN_PIN') ?? (kDebugMode ? '1234' : '');
+    if (kReleaseMode && (adminPin.isEmpty || adminPin == '1234')) {
+      throw StateError(
+        'Set a strong ADMIN_PIN in .env before release builds (not 1234).',
+      );
+    }
+
     return AppConfig(
       supabaseUrl: _require('SUPABASE_URL'),
       supabaseAnonKey: _require('SUPABASE_ANON_KEY'),
       propertyId: _require('PROPERTY_ID'),
       deviceId: _require('DEVICE_ID'),
-      adminPin: dotenv.maybeGet('ADMIN_PIN') ?? '1234',
+      adminPin: adminPin.isEmpty ? '1234' : adminPin,
       fingerprintReaderMode: effectiveReader,
       mockStaffId: dotenv.maybeGet('MOCK_STAFF_ID'),
       enableWebViewTab:

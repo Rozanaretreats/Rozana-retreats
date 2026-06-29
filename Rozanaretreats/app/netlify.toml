@@ -2,6 +2,14 @@
   command = "npm run build"
   publish = "dist"
 
+[build.environment]
+  NODE_VERSION = "22"
+
+# Required Netlify env vars (Site settings → Environment variables):
+#   VITE_SUPABASE_URL=https://oqksrcruypdmsggorrge.supabase.co
+#   VITE_SUPABASE_ANON_KEY=sb_publishable_...  (NOT legacy JWT anon key)
+#   VITE_ALLOW_MANUAL_PUNCHES=false
+
 [[redirects]]
   from = "/*"
   to = "/index.html"

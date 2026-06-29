@@ -35,6 +35,13 @@ function checkConfig() {
     console.error('Set SUPABASE_ANON_KEY in .env (copy from Rozanaretreats/app/.env.local)')
     process.exit(1)
   }
+  if (!serviceRoleClient()) {
+    console.error('Set SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SECRET_KEY) — required for idempotency')
+    process.exit(1)
+  }
+  if (!process.env.TRIGGER_SECRET?.trim()) {
+    console.warn('[config] TRIGGER_SECRET not set — /send-now is unauthenticated on localhost')
+  }
 }
 
 function requireEnv(name) {
@@ -62,10 +69,20 @@ function istToday() {
 
 function supabaseAuthKey() {
   return (
+    process.env.SUPABASE_SECRET_KEY?.trim() ||
     process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
     process.env.SUPABASE_ANON_KEY?.trim() ||
     ''
   )
+}
+
+function supabaseFetchHeaders(key) {
+  const headers = { apikey: key, 'Content-Type': 'application/json' }
+  // Legacy JWT keys use Bearer; new sb_publishable_/sb_secret_ keys use apikey only
+  if (!key.startsWith('sb_')) {
+    headers.Authorization = `Bearer ${key}`
+  }
+  return headers
 }
 
 async function fetchReportText(date, propertyId) {
@@ -76,7 +93,7 @@ async function fetchReportText(date, propertyId) {
 
   const res = await fetch(url, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${authKey}` },
+    headers: supabaseFetchHeaders(authKey),
   })
   if (!res.ok) throw new Error(`Edge Function ${res.status}: ${(await res.text()).slice(0, 300)}`)
 
@@ -87,7 +104,9 @@ async function fetchReportText(date, propertyId) {
 }
 
 function serviceRoleClient() {
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()
+  const key =
+    process.env.SUPABASE_SECRET_KEY?.trim() ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()
   if (!key) return null
   return createClient(requireEnv('SUPABASE_URL'), key)
 }
@@ -97,11 +116,11 @@ async function alreadySent(date, propertyId) {
   if (!supabase) return false
   const { data } = await supabase
     .from('report_send_log')
-    .select('id')
+    .select('id, status')
     .eq('report_date', date)
     .eq('property_id', propertyId)
     .maybeSingle()
-  return Boolean(data)
+  return data?.status === 'sent'
 }
 
 async function logSend(date, propertyId, recipients, status, detail) {
@@ -126,6 +145,24 @@ let sock = null
 let sending = false
 let reconnectAttempts = 0
 const MAX_RECONNECT = 8
+const MAX_SENDS_PER_DAY = Number(process.env.MAX_SENDS_PER_DAY ?? 3)
+let sendsToday = 0
+let sendsTodayDate = istToday()
+
+async function notifyFailure(message) {
+  const hook = process.env.FAILURE_WEBHOOK_URL?.trim()
+  console.error('[alert]', message)
+  if (!hook) return
+  try {
+    await fetch(hook, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'rozana-baileys', message, at: new Date().toISOString() }),
+    })
+  } catch (e) {
+    console.error('[alert] Webhook failed:', e)
+  }
+}
 
 async function resolveWaVersion() {
   try {
@@ -180,6 +217,14 @@ async function sendEodReport(force = false) {
   sending = true
   const propertyId = requireEnv('PROPERTY_ID')
   const date = istToday()
+  if (date !== sendsTodayDate) {
+    sendsTodayDate = date
+    sendsToday = 0
+  }
+  if (sendsToday >= MAX_SENDS_PER_DAY && !force) {
+    console.warn(`[eod] Daily cap (${MAX_SENDS_PER_DAY}) reached for ${date}`)
+    return
+  }
   const numbers = requireEnv('OWNER_WHATSAPP_NUMBERS')
     .split(',')
     .map((n) => n.trim().replace(/[^\d]/g, ''))
@@ -209,10 +254,13 @@ async function sendEodReport(force = false) {
     const okCount = results.filter((r) => r.ok).length
     const status = okCount === numbers.length ? 'sent' : okCount === 0 ? 'failed' : 'partial'
     await logSend(date, propertyId, numbers, status, `baileys:${JSON.stringify(results)}`)
+    sendsToday += 1
     console.log(`[eod] Done — ${status} (${okCount}/${numbers.length})`)
+    if (status === 'failed') await notifyFailure(`EOD WhatsApp failed for ${date} / ${propertyId}`)
   } catch (e) {
     console.error('[eod] Error:', e)
     await logSend(date, propertyId, numbers, 'failed', `baileys:${String(e)}`).catch(() => {})
+    await notifyFailure(`EOD error: ${String(e)}`)
   } finally {
     sending = false
   }
@@ -274,14 +322,15 @@ async function startWhatsApp() {
 
       if (loggedOut) {
         console.log('[baileys] Logged out — delete auth_info folder and run start.cmd again')
+        void notifyFailure('WhatsApp logged out — re-scan QR in auth_info')
         return
       }
 
       if (reconnectAttempts >= MAX_RECONNECT) {
         console.error(
-          `[baileys] Stopped after ${MAX_RECONNECT} retries. Check internet / VPN, then restart.`,
+          `[baileys] Stopped after ${MAX_RECONNECT} retries. Exiting so Task Scheduler can restart.`,
         )
-        return
+        process.exit(1)
       }
 
       reconnectAttempts += 1
@@ -311,13 +360,23 @@ function scheduleCron() {
 }
 
 const TRIGGER_PORT = Number(process.env.TRIGGER_PORT ?? 3939)
+const TRIGGER_SECRET = process.env.TRIGGER_SECRET?.trim() ?? ''
 
 function startTriggerServer() {
   const server = http.createServer(async (req, res) => {
-    if (req.url !== '/send-now' || req.method !== 'GET') {
+    if (req.url?.split('?')[0] !== '/send-now' || req.method !== 'GET') {
       res.statusCode = 404
       res.end('Use GET /send-now')
       return
+    }
+    if (TRIGGER_SECRET) {
+      const url = new URL(req.url, 'http://127.0.0.1')
+      const key = url.searchParams.get('key') ?? req.headers['x-trigger-secret']
+      if (key !== TRIGGER_SECRET) {
+        res.statusCode = 401
+        res.end('Unauthorized — set TRIGGER_SECRET in .env')
+        return
+      }
     }
     res.setHeader('Content-Type', 'text/plain; charset=utf-8')
     if (!sock) {

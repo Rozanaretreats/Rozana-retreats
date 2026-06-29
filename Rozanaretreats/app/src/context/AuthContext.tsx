@@ -1,15 +1,18 @@
-import { createContext, useContext, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 
 import type { User } from '../types'
 
 import { demoUsers } from '../data/mockData'
 
 import { authenticateStaffLogin } from '../lib/staffAuth'
+import { userFromSession } from '../lib/sessionUser'
+import { supabase } from '../lib/supabase'
 
 interface AuthContextValue {
   user: User | null
+  authReady: boolean
   login: (email: string, password: string) => Promise<boolean>
-  logout: () => void
+  logout: () => Promise<void>
   isOwner: boolean
   isOperationsManager: boolean
   isHousekeepingStaff: boolean
@@ -18,19 +21,6 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | null>(null)
 
 const STORAGE_KEY = 'rozana_session'
-const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
-
-/** Dev: session ends when the browser tab closes. Prod: 7-day remember-me in localStorage. */
-const authStorage = import.meta.env.DEV ? sessionStorage : localStorage
-
-if (import.meta.env.DEV) {
-  localStorage.removeItem(STORAGE_KEY)
-}
-
-type StoredSession = {
-  user: User
-  expiresAt: number
-}
 
 function repairDemoUser(stored: User): User {
   const match = demoUsers.find((d) => d.user.email.toLowerCase() === stored.email.toLowerCase())
@@ -43,65 +33,106 @@ function repairDemoUser(stored: User): User {
   }
 }
 
-function loadSessionUser(): User | null {
+function loadDevDemoSession(): User | null {
+  if (!import.meta.env.DEV) return null
   try {
-    const raw = authStorage.getItem(STORAGE_KEY)
+    const raw = sessionStorage.getItem(STORAGE_KEY)
     if (!raw) return null
-
-    const parsed = JSON.parse(raw) as StoredSession | User
-    if ('expiresAt' in parsed && typeof parsed.expiresAt === 'number') {
-      if (Date.now() > parsed.expiresAt) {
-        authStorage.removeItem(STORAGE_KEY)
-        return null
-      }
-      return repairDemoUser(parsed.user)
-    }
-
-    return repairDemoUser(parsed as User)
+    return repairDemoUser(JSON.parse(raw) as User)
   } catch {
     return null
   }
 }
 
-function persistSession(user: User) {
-  const payload: StoredSession = {
-    user,
-    expiresAt: Date.now() + SESSION_TTL_MS,
-  }
-  authStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
+function persistDevDemoSession(user: User) {
+  sessionStorage.setItem(STORAGE_KEY, JSON.stringify(user))
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(loadSessionUser)
+  const [user, setUser] = useState<User | null>(loadDevDemoSession)
+  const [authReady, setAuthReady] = useState(!supabase)
+
+  useEffect(() => {
+    if (!supabase) return
+
+    let mounted = true
+
+    const sync = async () => {
+      if (!supabase) return
+      const { data } = await supabase.auth.getSession()
+      if (!mounted) return
+      if (data.session) {
+        const appUser = await userFromSession(data.session)
+        if (appUser) setUser(appUser)
+      }
+      setAuthReady(true)
+    }
+
+    void sync()
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (!mounted) return
+      if (!session) {
+        if (!import.meta.env.DEV) setUser(null)
+        return
+      }
+      const appUser = await userFromSession(session)
+      if (appUser) setUser(appUser)
+    })
+
+    return () => {
+      mounted = false
+      subscription.unsubscribe()
+    }
+  }, [])
 
   const login = async (email: string, password: string) => {
-    const demo = demoUsers.find(
-      (d) => d.email.toLowerCase() === email.toLowerCase() && d.password === password,
-    )
-    if (demo) {
-      const sessionUser = repairDemoUser(demo.user as User)
-      setUser(sessionUser)
-      persistSession(sessionUser)
+    if (import.meta.env.DEV) {
+      const demo = demoUsers.find(
+        (d) => d.email.toLowerCase() === email.toLowerCase() && d.password === password,
+      )
+      if (demo) {
+        const sessionUser = repairDemoUser(demo.user as User)
+        setUser(sessionUser)
+        persistDevDemoSession(sessionUser)
+        return true
+      }
+    }
+
+    if (!supabase) {
+      const staffUser = await authenticateStaffLogin(email, password)
+      if (!staffUser) return false
+      setUser(staffUser)
       return true
     }
 
-    const staffUser = await authenticateStaffLogin(email, password)
-    if (!staffUser) return false
+    const normalized = email.trim().toLowerCase()
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: normalized,
+      password,
+    })
+    if (error || !data.session) return false
 
-    setUser(staffUser)
-    persistSession(staffUser)
+    const appUser = await userFromSession(data.session)
+    if (!appUser) return false
+
+    setUser(appUser)
     return true
   }
 
-  const logout = () => {
+  const logout = async () => {
     setUser(null)
-    authStorage.removeItem(STORAGE_KEY)
+    if (import.meta.env.DEV) sessionStorage.removeItem(STORAGE_KEY)
+    if (supabase) await supabase.auth.signOut()
   }
 
   return (
     <AuthContext.Provider
       value={{
         user,
+        authReady,
         login,
         logout,
         isOwner: user?.role === 'owner',
