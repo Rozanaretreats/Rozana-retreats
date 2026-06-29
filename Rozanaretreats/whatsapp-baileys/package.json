@@ -1,0 +1,17 @@
+{
+  "name": "rozana-whatsapp-baileys",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.mjs",
+    "send-now": "node src/index.mjs --send-now"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1",
+    "@whiskeysockets/baileys": "^6.7.22",
+    "dotenv": "^16.4.7",
+    "node-cron": "^3.0.3",
+    "pino": "^9.6.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

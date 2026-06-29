@@ -5,8 +5,8 @@ import { createClient } from "@supabase/supabase-js";
  * Module 4 — End-of-Day Owner Report + Incomplete-Task Alerts.
  *
  * Compiles the day's attendance, leave, and housekeeping completions for each
- * property and sends both owners a WhatsApp summary with proof links. Rooms left
- * undone / unproven are flagged as outstanding (the incomplete-task alert).
+ * property and sends owners a WhatsApp summary. Rooms left undone are flagged.
+ * Proof photos are viewed in Rozana Ops (not linked in WhatsApp).
  *
  * The report is generated entirely server-side from Supabase data and cannot be
  * edited by the operator. Idempotent per (report_date, property_id) via the
@@ -28,8 +28,6 @@ import { createClient } from "@supabase/supabase-js";
  * Auto-injected by Supabase: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
  */
 
-const BUCKET = "hk-photos";
-const HK_PREFIX = "hk://";
 const GRAPH_VERSION = "v21.0";
 
 type Property = { id: string; name: string; short_name: string };
@@ -59,15 +57,15 @@ function hhmm(time: string | undefined): string {
   return time.slice(0, 5);
 }
 
-function storagePathFromRef(ref: string | null): string | null {
-  if (!ref) return null;
-  if (ref.startsWith(HK_PREFIX)) return ref.slice(HK_PREFIX.length);
-  const publicMarker = "/storage/v1/object/public/hk-photos/";
-  const signMarker = "/storage/v1/object/sign/hk-photos/";
-  if (ref.includes(publicMarker)) return ref.split(publicMarker)[1]?.split("?")[0] ?? null;
-  if (ref.includes(signMarker)) return ref.split(signMarker)[1]?.split("?")[0] ?? null;
-  if (ref.startsWith("http") || ref.startsWith("data:")) return null;
-  return ref;
+/** Latest OUT punch strictly after the day's first IN (ignores stale/early OUT rows). */
+function latestOutAfterIn(staffId: string, firstInTime: string, punchList: Punch[]): string | undefined {
+  let latest: string | undefined;
+  for (const p of punchList) {
+    if (p.staff_id !== staffId || p.punch_type !== "out") continue;
+    if (p.punch_time <= firstInTime) continue;
+    if (!latest || p.punch_time > latest) latest = p.punch_time;
+  }
+  return latest;
 }
 
 Deno.serve(async (req: Request) => {
@@ -217,17 +215,13 @@ async function buildReport(
       .map((l) => l.staff_id),
   );
 
-  // Attendance per staff
+  // Attendance per staff — first IN; OUT only if after that IN
+  const punchList = (punches ?? []) as Punch[];
   const firstIn = new Map<string, string>();
-  const lastOut = new Map<string, string>();
-  for (const p of (punches ?? []) as Punch[]) {
-    if (p.punch_type === "in") {
-      const cur = firstIn.get(p.staff_id);
-      if (!cur || p.punch_time < cur) firstIn.set(p.staff_id, p.punch_time);
-    } else if (p.punch_type === "out") {
-      const cur = lastOut.get(p.staff_id);
-      if (!cur || p.punch_time > cur) lastOut.set(p.staff_id, p.punch_time);
-    }
+  for (const p of punchList) {
+    if (p.punch_type !== "in") continue;
+    const cur = firstIn.get(p.staff_id);
+    if (!cur || p.punch_time < cur) firstIn.set(p.staff_id, p.punch_time);
   }
 
   const present: string[] = [];
@@ -235,12 +229,14 @@ async function buildReport(
   const missing: string[] = [];
   for (const s of staffList) {
     if (firstIn.has(s.id)) {
-      const out = lastOut.has(s.id) ? hhmm(lastOut.get(s.id)) : "still in";
-      present.push(`• ${s.name} (${hhmm(firstIn.get(s.id))}–${out})`);
+      const inTime = firstIn.get(s.id)!;
+      const outTime = latestOutAfterIn(s.id, inTime, punchList);
+      const out = outTime ? hhmm(outTime) : "still in";
+      present.push(`  ✅ ${s.name} · ${hhmm(inTime)}–${out}`);
     } else if (onLeave.has(s.id)) {
-      leaveNames.push(`• ${s.name}`);
+      leaveNames.push(`  🏖️ ${s.name}`);
     } else {
-      missing.push(`• ${s.name}`);
+      missing.push(`  ❌ ${s.name}`);
     }
   }
 
@@ -253,60 +249,47 @@ async function buildReport(
 
   const doneLines = doneTasks.map((t) => {
     const who = t.assigned_staff_id ? staffName.get(t.assigned_staff_id) ?? "?" : "unassigned";
-    const proof = t.photo_after_url ? " ✓proof" : " ⚠no-photo";
-    return `• ${roomLabel.get(t.room_id) ?? t.room_id} — ${who}${proof}`;
+    const proof = t.photo_after_url ? " 📸" : " ⚠️ no photo";
+    return `  ✅ ${roomLabel.get(t.room_id) ?? t.room_id} · ${who}${proof}`;
   });
 
   const outstandingLines = outstanding.map((t) => {
     const who = t.assigned_staff_id ? staffName.get(t.assigned_staff_id) ?? "?" : "unassigned";
+    const icon = t.status === "cleaning" ? "🔄" : "⏳";
     const state = t.status === "cleaning" ? "in progress" : "not started";
-    return `• ${roomLabel.get(t.room_id) ?? t.room_id} — ${who} (${state})`;
+    return `  ${icon} ${roomLabel.get(t.room_id) ?? t.room_id} · ${who} (${state})`;
   });
 
-  // Proof links (signed, 24h) — limited to keep the message readable
-  const proofLines: string[] = [];
-  for (const t of doneTasks) {
-    if (proofLines.length >= 12) break;
-    const path = storagePathFromRef(t.photo_after_url);
-    if (!path) continue;
-    const { data } = await supabase.storage.from(BUCKET).createSignedUrl(path, 60 * 60 * 24);
-    if (data?.signedUrl) {
-      proofLines.push(`• ${roomLabel.get(t.room_id) ?? t.room_id}: ${data.signedUrl}`);
-    }
-  }
-
   const lines: string[] = [];
-  lines.push(`*${property.name}* — Daily Report`);
-  lines.push(`${date}`);
+  lines.push(`🏨 *${property.name}*`);
+  lines.push(`📅 *End-of-day report* · ${date}`);
   lines.push("");
-  lines.push(`*Attendance*`);
-  lines.push(`Present (${present.length}):`);
-  lines.push(present.length ? present.join("\n") : "• none");
+  lines.push(`👥 *ATTENDANCE*`);
+  lines.push(`✅ *Present* (${present.length})`);
+  lines.push(present.length ? present.join("\n") : "  — none");
   if (leaveNames.length) {
-    lines.push(`On leave (${leaveNames.length}):`);
+    lines.push(`🏖️ *On leave* (${leaveNames.length})`);
     lines.push(leaveNames.join("\n"));
   }
-  lines.push(`Not in / absent (${missing.length}):`);
-  lines.push(missing.length ? missing.join("\n") : "• none");
+  lines.push(`❌ *Absent / not in* (${missing.length})`);
+  lines.push(missing.length ? missing.join("\n") : "  — none");
   lines.push("");
-  lines.push(`*Housekeeping* — ${doneTasks.length}/${assigned.length} rooms done`);
+  lines.push(`🧹 *HOUSEKEEPING* · ${doneTasks.length}/${assigned.length} rooms done`);
   if (doneLines.length) lines.push(doneLines.join("\n"));
+  else lines.push("  — none completed");
   if (outstanding.length) {
     lines.push("");
-    lines.push(`⚠️ *Outstanding (${outstanding.length})*`);
+    lines.push(`⚠️ *OUTSTANDING* (${outstanding.length})`);
     lines.push(outstandingLines.join("\n"));
   }
   if (unproven.length) {
     lines.push("");
-    lines.push(`⚠️ ${unproven.length} room(s) marked done without a photo`);
-  }
-  if (proofLines.length) {
-    lines.push("");
-    lines.push(`*Proof photos (24h links)*`);
-    lines.push(proofLines.join("\n"));
+    lines.push(`📷 ${unproven.length} room(s) done without photo proof`);
   }
   lines.push("");
-  lines.push("_System-generated. Cannot be edited._");
+  lines.push(`📱 *View proof photos:* Rozana Ops → Reports → Housekeeping`);
+  lines.push("");
+  lines.push(`_🤖 System-generated · cannot be edited_`);
 
   return lines.join("\n");
 }

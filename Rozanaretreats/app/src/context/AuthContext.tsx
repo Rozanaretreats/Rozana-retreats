@@ -20,6 +20,13 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 const STORAGE_KEY = 'rozana_session'
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
+/** Dev: session ends when the browser tab closes. Prod: 7-day remember-me in localStorage. */
+const authStorage = import.meta.env.DEV ? sessionStorage : localStorage
+
+if (import.meta.env.DEV) {
+  localStorage.removeItem(STORAGE_KEY)
+}
+
 type StoredSession = {
   user: User
   expiresAt: number
@@ -38,13 +45,13 @@ function repairDemoUser(stored: User): User {
 
 function loadSessionUser(): User | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = authStorage.getItem(STORAGE_KEY)
     if (!raw) return null
 
     const parsed = JSON.parse(raw) as StoredSession | User
     if ('expiresAt' in parsed && typeof parsed.expiresAt === 'number') {
       if (Date.now() > parsed.expiresAt) {
-        localStorage.removeItem(STORAGE_KEY)
+        authStorage.removeItem(STORAGE_KEY)
         return null
       }
       return repairDemoUser(parsed.user)
@@ -61,7 +68,7 @@ function persistSession(user: User) {
     user,
     expiresAt: Date.now() + SESSION_TTL_MS,
   }
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
+  authStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -88,7 +95,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = () => {
     setUser(null)
-    localStorage.removeItem(STORAGE_KEY)
+    authStorage.removeItem(STORAGE_KEY)
   }
 
   return (
